@@ -1,0 +1,9 @@
+{
+  "name": "todo-speadsheet",
+  "version": "1.0.0",
+  "description": "Google Apps Script helpers for a todo spreadsheet: move completed tasks to a Done sheet with hours tracking, and move tasks to a projects sheet.",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

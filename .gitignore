@@ -1,0 +1,10 @@
+# Editor backup/undo files
+*.un~
+*~
+*.swp
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
