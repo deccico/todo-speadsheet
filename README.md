@@ -64,11 +64,26 @@ Alternatively, manage the project from this repository with
 code PERMISSION_DENIED"** — a long-standing Google bug, not a bug in this
 script: when the browser profile is signed into more than one Google
 account, `google.script.run` calls from an HTML dialog can run under the
-wrong account and fail with this error. There is no code-side fix. Sign out
-of the other Google accounts, or open the spreadsheet in a Chrome profile
-(or incognito window) where only the owning account is signed in. Its
-symptom with this script: the dialog closes on OK but the rows stay put and
-no toast appears.
+wrong account and fail with this error. It affects every browser (the
+sessions share one cookie jar) and there is no code-side fix. Ways around
+it, in order of convenience:
+
+- **Firefox**: install Mozilla's *Multi-Account Containers* extension and
+  open the spreadsheet in a container where only the owning account is
+  signed in — other accounts keep working in normal tabs.
+- **Any browser**: make the owning account the *default* account — sign out
+  of all Google accounts, sign in with the owning account first, then the
+  others (the dialog binds to the first session).
+- **Any browser**: use a private window, or a separate browser profile,
+  with only the owning account signed in.
+
+If the dialog still fails with only one account signed in, Firefox's
+Enhanced Tracking Protection / Total Cookie Protection may be blocking the
+dialog iframe's cookies: click the shield icon on the docs.google.com tab
+and turn protection off for that site.
+
+Its symptom with this script: the dialog closes on OK but the rows stay put
+and no toast appears.
 
 The dialog also takes a moment to open: `HtmlService` dialogs load inside a
 sandboxed iframe, which costs roughly a second. That is inherent to Apps
