@@ -6,6 +6,8 @@ const {
   extractHoursEstimates,
   computeDefaultHours,
   buildHoursPromptMessage,
+  escapeHtml,
+  buildHoursDialogHtml,
   resolveHoursPlan,
 } = require("../Done.js");
 
@@ -54,15 +56,54 @@ test("computeDefaultHours rounds away floating-point noise", () => {
   assert.equal(computeDefaultHours([[0.1], [0.2]]), 0.3);
 });
 
-test("buildHoursPromptMessage mentions the default when one exists", () => {
-  assert.match(buildHoursPromptMessage(5.5), /leave blank/);
-  assert.match(buildHoursPromptMessage(5.5), /total: 5\.5/);
+test("buildHoursPromptMessage explains the suggestion when one exists", () => {
+  const message = buildHoursPromptMessage(5.5);
+  assert.match(message, /suggested value/);
+  assert.match(message, /Column E/);
 });
 
-test("buildHoursPromptMessage omits the default when there is none", () => {
+test("buildHoursPromptMessage omits the suggestion talk when there is none", () => {
   const message = buildHoursPromptMessage(null);
-  assert.doesNotMatch(message, /blank/);
-  assert.doesNotMatch(message, /default/);
+  assert.doesNotMatch(message, /suggest/i);
+  assert.doesNotMatch(message, /Column E/);
+});
+
+test("escapeHtml escapes HTML metacharacters", () => {
+  assert.equal(
+    escapeHtml('<b>"a" & \'b\'</b>'),
+    "&lt;b&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/b&gt;"
+  );
+});
+
+const DIALOG_CONTEXT = { sheetName: "Tasks", startRow: 3, numRows: 2 };
+
+test("buildHoursDialogHtml prefills the input with the suggested total", () => {
+  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
+  assert.match(html, /value="5\.5"/);
+});
+
+test("buildHoursDialogHtml pre-selects the suggestion so typing replaces it", () => {
+  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
+  assert.match(html, /input\.select\(\)/);
+});
+
+test("buildHoursDialogHtml leaves the input empty when there is no suggestion", () => {
+  const html = buildHoursDialogHtml(null, DIALOG_CONTEXT);
+  assert.match(html, /value=""/);
+});
+
+test("buildHoursDialogHtml embeds the label and the selection snapshot", () => {
+  const html = buildHoursDialogHtml(4, DIALOG_CONTEXT);
+  assert.match(html, /Column E/);
+  assert.ok(html.includes('{"sheetName":"Tasks","startRow":3,"numRows":2}'));
+  assert.match(html, /completeTaskMove\(/);
+});
+
+test("buildHoursDialogHtml neutralizes a hostile sheet name", () => {
+  const hostile = '</script><script>alert(1)</script>';
+  const html = buildHoursDialogHtml(4, { sheetName: hostile, startRow: 1, numRows: 1 });
+  assert.ok(!html.includes(hostile));
+  assert.ok(html.includes("\\u003c/script>"));
 });
 
 test("resolveHoursPlan: blank input accepts each row's own estimate", () => {
@@ -83,6 +124,19 @@ test("resolveHoursPlan: blank input is invalid when no estimate exists", () => {
 
 test("resolveHoursPlan: a typed number overrides the default for every row", () => {
   assert.deepEqual(resolveHoursPlan("7", [[1], [2]]), { sameHours: 7 });
+});
+
+test("resolveHoursPlan: submitting the suggested total unchanged keeps per-row estimates", () => {
+  assert.deepEqual(resolveHoursPlan("3", [[1], [2]]), { perRowHours: [1, 2] });
+});
+
+test("resolveHoursPlan: the suggested total matches numerically, not textually", () => {
+  assert.deepEqual(resolveHoursPlan("3.0", [[1], [2]]), { perRowHours: [1, 2] });
+  assert.deepEqual(resolveHoursPlan(" 3 ", [[1], [2]]), { perRowHours: [1, 2] });
+});
+
+test("resolveHoursPlan: accepting the suggestion leaves estimate-less rows empty", () => {
+  assert.deepEqual(resolveHoursPlan("2", [[2], [""]]), { perRowHours: [2, null] });
 });
 
 test("resolveHoursPlan: typed decimals and surrounding whitespace are accepted", () => {

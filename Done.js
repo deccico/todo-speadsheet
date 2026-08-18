@@ -56,34 +56,109 @@ function computeDefaultHours(columnEValues) {
 }
 
 /**
- * Builds the prompt message, mentioning the Column E default when one exists.
+ * Builds the dialog label, explaining the Column E suggestion when one
+ * exists. The suggested number itself is prefilled in the input, so the
+ * label does not repeat it.
  *
  * @param {?number} defaultHours Total from computeDefaultHours().
- * @return {string} The message for ui.prompt().
+ * @return {string} The label for the hours dialog.
  */
 function buildHoursPromptMessage(defaultHours) {
   if (defaultHours === null) {
     return 'Please enter the total hours for the completed task(s):';
   }
-  return 'Please enter the total hours for the completed task(s), or leave ' +
-    'blank to use each row\'s own Column E estimate (total: ' + defaultHours + '):';
+  return 'Please enter the total hours for the completed task(s). The ' +
+    'suggested value is the Column E estimate total; accept it unchanged ' +
+    'and each moved row keeps its own estimate:';
 }
 
 /**
- * Turns the prompt response into a write plan for Column O of the Done sheet.
- * Blank input accepts the Column E estimates: each row receives its own
- * estimate (rows without one are left empty). A typed number is written to
- * every moved row, matching the script's historical behavior.
+ * Escapes text for safe embedding in HTML content or attribute values.
  *
- * @param {string} hoursInput Raw text the user typed in the prompt.
+ * @param {*} value The value to escape.
+ * @return {string} The escaped HTML.
+ */
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Builds the self-contained HTML for the hours dialog. Apps Script's
+ * ui.prompt cannot prefill its text box, so an HtmlService dialog is used
+ * instead: the Column E suggestion is written into the input and
+ * pre-selected, making OK/Enter accept it while typing replaces it. Built
+ * from a string so the project stays a single pasteable file. Submitting
+ * calls completeTaskMove(input, context) on the server via
+ * google.script.run; a validation error is shown inside the dialog.
+ *
+ * @param {?number} defaultHours Total from computeDefaultHours().
+ * @param {{sheetName: string, startRow: number, numRows: number}} context
+ *     Snapshot of the selection, echoed back to completeTaskMove().
+ * @return {string} The dialog HTML.
+ */
+function buildHoursDialogHtml(defaultHours, context) {
+  // <-escape so a hostile sheet name cannot close the <script> block
+  var contextJson = JSON.stringify(context).replace(/</g, "\\u003c");
+  return '' +
+    '<div style="font-family: Arial, Helvetica, sans-serif; font-size: 13px;">' +
+    '<p style="margin-top: 0;">' + escapeHtml(buildHoursPromptMessage(defaultHours)) + '</p>' +
+    '<form id="hours-form">' +
+    '<input type="text" id="hours" autofocus ' +
+    'style="width: 100%; box-sizing: border-box; font-size: 13px; padding: 4px;" ' +
+    'value="' + (defaultHours === null ? '' : escapeHtml(defaultHours)) + '">' +
+    '<p id="error" style="color: #cc0000; min-height: 1.2em; margin: 8px 0;"></p>' +
+    '<div style="text-align: right;">' +
+    '<button type="button" id="cancel">Cancel</button> ' +
+    '<button type="submit" id="ok">OK</button>' +
+    '</div>' +
+    '</form>' +
+    '</div>' +
+    '<script>' +
+    'var context = ' + contextJson + ';' +
+    'var input = document.getElementById("hours");' +
+    'window.setTimeout(function() { input.focus(); input.select(); }, 0);' +
+    'function setBusy(busy) {' +
+    '  document.getElementById("ok").disabled = busy;' +
+    '  document.getElementById("cancel").disabled = busy;' +
+    '}' +
+    'document.getElementById("cancel").onclick = function() { google.script.host.close(); };' +
+    'document.getElementById("hours-form").onsubmit = function(event) {' +
+    '  event.preventDefault();' +
+    '  setBusy(true);' +
+    '  document.getElementById("error").textContent = "";' +
+    '  google.script.run' +
+    '    .withSuccessHandler(function() { google.script.host.close(); })' +
+    '    .withFailureHandler(function(err) {' +
+    '      document.getElementById("error").textContent = (err && err.message) ? err.message : String(err);' +
+    '      setBusy(false);' +
+    '    })' +
+    '    .completeTaskMove(input.value, context);' +
+    '};' +
+    '</script>';
+}
+
+/**
+ * Turns the dialog input into a write plan for Column O of the Done sheet.
+ * Accepting the suggestion — submitting the prefilled total unchanged, or
+ * blank input — applies the Column E estimates: each row receives its own
+ * estimate (rows without one are left empty). Any other number is written
+ * to every moved row, matching the script's historical behavior.
+ *
+ * @param {string} hoursInput Raw text the user submitted in the dialog.
  * @param {Array<Array>} columnEValues Column E values of the selection.
  * @return {?{perRowHours: Array<?number>}|{sameHours: number}} The plan, or
  *     null when the input is invalid (non-numeric, or blank with no default).
  */
 function resolveHoursPlan(hoursInput, columnEValues) {
   var trimmed = String(hoursInput).trim();
+  var defaultHours = computeDefaultHours(columnEValues);
   if (trimmed === "") {
-    if (computeDefaultHours(columnEValues) === null) {
+    if (defaultHours === null) {
       return null;
     }
     return { perRowHours: extractHoursEstimates(columnEValues) };
@@ -92,9 +167,17 @@ function resolveHoursPlan(hoursInput, columnEValues) {
   if (typed === null) {
     return null;
   }
+  if (defaultHours !== null && typed === defaultHours) {
+    return { perRowHours: extractHoursEstimates(columnEValues) };
+  }
   return { sameHours: typed };
 }
 
+/**
+ * Menu entry point: validates the selection and opens the hours dialog with
+ * the Column E suggestion prefilled. showModalDialog does not block, so the
+ * dialog calls completeTaskMove() to perform the actual move.
+ */
 function taskIsDone() {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -117,25 +200,54 @@ function taskIsDone() {
   var startRow = activeRange.getRow();
   var numRows = activeRange.getNumRows();
 
-  var numCols = sourceSheet.getLastColumn();
-  if (numCols === 0) return;
+  if (sourceSheet.getLastColumn() === 0) return;
 
-  // Offer a default taken from the estimates in Column E of the selection
+  // Offer a suggestion taken from the estimates in Column E of the selection
   var colEValues = sourceSheet.getRange(startRow, 5, numRows, 1).getValues();
   var defaultHours = computeDefaultHours(colEValues);
 
-  // Prompt the user for total hours
-  var response = ui.prompt('Total Hours', buildHoursPromptMessage(defaultHours), ui.ButtonSet.OK_CANCEL);
+  var html = buildHoursDialogHtml(defaultHours, {
+    sheetName: sourceSheet.getName(),
+    startRow: startRow,
+    numRows: numRows
+  });
+  ui.showModalDialog(
+    HtmlService.createHtmlOutput(html).setWidth(360).setHeight(210),
+    'Total Hours');
+}
 
-  // User clicked Cancel or closed the dialog box
-  if (response.getSelectedButton() != ui.Button.OK) {
-    return;
+/**
+ * Called by the hours dialog via google.script.run. Moves the snapshotted
+ * selection to the Done sheet, writing the completion timestamp to Column N
+ * and the resolved hours to Column O. Throws on invalid input so the dialog
+ * shows the message and stays open for a correction.
+ *
+ * @param {string} hoursInput Raw text from the dialog input.
+ * @param {{sheetName: string, startRow: number, numRows: number}} context
+ *     Selection snapshot taken when the dialog was opened.
+ */
+function completeTaskMove(hoursInput, context) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sourceSheet = ss.getSheetByName(context.sheetName);
+  var targetSheet = ss.getSheetByName("Done");
+
+  if (!sourceSheet || !targetSheet) {
+    throw new Error("The source or Done sheet no longer exists.");
   }
 
-  var hoursPlan = resolveHoursPlan(response.getResponseText(), colEValues);
+  var startRow = context.startRow;
+  var numRows = context.numRows;
+  if (!(startRow >= 1) || !(numRows >= 1)) {
+    throw new Error("The selection is no longer valid. Please try again.");
+  }
+
+  var numCols = sourceSheet.getLastColumn();
+  if (numCols === 0) return;
+
+  var colEValues = sourceSheet.getRange(startRow, 5, numRows, 1).getValues();
+  var hoursPlan = resolveHoursPlan(hoursInput, colEValues);
   if (hoursPlan === null) {
-    ui.alert('Invalid input', 'You must enter a numeric value for hours. Operation cancelled.', ui.ButtonSet.OK);
-    return;
+    throw new Error("You must enter a numeric value for hours.");
   }
 
   // Get the data from the selected rows
@@ -156,7 +268,7 @@ function taskIsDone() {
   targetSheet.getRange(2, 14, numRows, 1).setValue(timestamp);
 
   // Add the hours to Column O (Column 15): per-row estimates when the
-  // default was accepted, otherwise the typed value on every row
+  // suggestion was accepted, otherwise the typed value on every row
   var hoursRange = targetSheet.getRange(2, 15, numRows, 1);
   if (hoursPlan.perRowHours) {
     var hoursColumn = [];
@@ -221,6 +333,8 @@ if (typeof module !== "undefined" && module.exports) {
     extractHoursEstimates: extractHoursEstimates,
     computeDefaultHours: computeDefaultHours,
     buildHoursPromptMessage: buildHoursPromptMessage,
+    escapeHtml: escapeHtml,
+    buildHoursDialogHtml: buildHoursDialogHtml,
     resolveHoursPlan: resolveHoursPlan
   };
 }
