@@ -9,28 +9,33 @@ and the hours spent) or to a **Todo Projects** sheet.
 ### `taskIsDone()`
 
 Moves the currently selected row(s) from the active sheet to the **Done**
-sheet:
+sheet using a two-press flow with no dialogs — the sheet itself is the hours
+input:
 
-1. Opens a small dialog asking for the hours spent on the completed task(s).
-   The input comes **prefilled with a suggestion** taken from **Column E**
-   (the estimate column) — the total of the selection's numeric estimates —
-   and the text is pre-selected, so pressing **OK**/**Enter** accepts it and
-   typing a number replaces it. Accepting the suggestion unchanged (or
-   clearing the input) gives each moved row its own Column E estimate (rows
-   without a numeric estimate are left empty); any other number is written to
-   every moved row. OK validates the input inside the dialog and closes it
-   immediately; the move then runs in the background and a toast
-   (bottom-right) reports the result.
-2. Inserts the rows at the top of the **Done** sheet (starting at row 2) and
-   clears any bold formatting inherited from the header row.
-3. Writes the completion date/time to **Column N** and the hours to
-   **Column O** of each moved row.
-4. Deletes the original rows from the source sheet.
+1. **First press** — the suggestion is prefilled *in the sheet*: each
+   selected row's **Column E** estimate is written into its **Column O**
+   cell (only blank cells are filled; existing values and every other
+   column are never touched), the cells are selected, and a toast asks you
+   to confirm. Adjust any value directly in the cell — per-row overrides
+   are possible.
+2. **Second press** — the rows are moved: inserted at the top of the
+   **Done** sheet (row 2) with bold formatting cleared, completion
+   date/time written to **Column N**, and the Column O hours kept as the
+   recorded hours. The original rows are deleted and a toast confirms the
+   total.
 
-If Column E contains no numeric value anywhere in the selection, the input
-starts empty and an explicit numeric input is required. Input is parsed
-strictly: `3 hours` or `1,5` is rejected rather than silently recorded as `3`
-or `1` — the dialog shows the error and stays open for a correction.
+Details of the flow:
+
+- If you type the actual hours into Column O yourself before pressing, the
+  rows move on the **first** press — no confirmation needed.
+- The pending confirmation is remembered for 5 minutes, so it still
+  completes if pressing Enter after typing in Column O moved the cursor one
+  row down. A fingerprint of the tasks' Column A text guarantees rows that
+  shifted in the meantime are never moved by mistake.
+- A non-numeric Column O value (`4h`, `1,5`) refuses the move and points at
+  the offending row; parsing is strict so a typo cannot silently record the
+  wrong hours. Rows without an estimate are left blank for you to fill (or
+  confirm as blank by pressing again).
 
 ### `moveToProjectsSheet()`
 
@@ -43,9 +48,27 @@ source sheet.
 
 | Sheet | Purpose |
 |---|---|
-| (any task sheet) | Source of rows; Column E holds the hours estimate |
+| (any task sheet) | Source of rows; Column A holds the task detail, Column E the hours estimate, Column O the hours input for the move (columns M and after are otherwise empty) |
 | `Done` | Completed tasks; Column N = completion timestamp, Column O = hours spent |
 | `Todo Projects` | Project backlog; rows are inserted after row 4 |
+
+## Design note: why the sheet is the input (no dialog)
+
+The obvious design — a prompt with the suggestion prefilled in its text
+box — is not reliably buildable in Apps Script:
+
+- The native `ui.prompt` cannot prefill its text box at all.
+- An `HtmlService` dialog can, but returning the value requires
+  `google.script.run`, which suffers a long-standing Google bug: with more
+  than one Google account signed into the browser (any browser), the call
+  can run under the wrong account and fail with *"a server error occurred
+  while reading from storage. Error code PERMISSION_DENIED"*. Such dialogs
+  also take about a second to open (sandboxed iframe).
+
+So the suggestion is prefilled into Column O natively, edited as a normal
+cell, and read back on the second press. This uses no HTML, no iframes and
+no `google.script.run`, making it immune to the multi-account bug and as
+fast as Sheets itself.
 
 ## Installation
 
@@ -58,56 +81,15 @@ source sheet.
 Alternatively, manage the project from this repository with
 [clasp](https://github.com/google/clasp).
 
-## Troubleshooting
-
-**"We're sorry, a server error occurred while reading from storage. Error
-code PERMISSION_DENIED"** — a long-standing Google bug, not a bug in this
-script: when the browser profile is signed into more than one Google
-account, `google.script.run` calls from an HTML dialog can run under the
-wrong account and fail with this error. It affects every browser (the
-sessions share one cookie jar) and there is no code-side fix. Ways around
-it, in order of convenience:
-
-- **Firefox**: install Mozilla's *Multi-Account Containers* extension and
-  open the spreadsheet in a container where only the owning account is
-  signed in — other accounts keep working in normal tabs.
-- **Any browser**: make the owning account the *default* account — sign out
-  of all Google accounts, sign in with the owning account first, then the
-  others (the dialog binds to the first session).
-- **Any browser**: use a private window, or a separate browser profile,
-  with only the owning account signed in.
-
-If the dialog still fails with only one account signed in, Firefox's
-Enhanced Tracking Protection / Total Cookie Protection may be blocking the
-dialog iframe's cookies: click the shield icon on the docs.google.com tab
-and turn protection off for that site.
-
-Its symptom with this script: the dialog closes on OK but the rows stay put
-and no toast appears.
-
-The dialog also takes a moment to open: `HtmlService` dialogs load inside a
-sandboxed iframe, which costs roughly a second. That is inherent to Apps
-Script (the native `ui.prompt` is instant but cannot prefill its text box),
-and is why the dialog validates locally and closes immediately on OK rather
-than staying open while the move runs.
-
 ## Development
 
-Apps Script's `ui.prompt` cannot prefill its text box, so the hours prompt is
-an `HtmlService` modal built from an inline string (`buildHoursDialogHtml`) —
-no separate HTML file, keeping the project a single pasteable file. Because
-`showModalDialog` does not block, `taskIsDone()` only opens the dialog. The
-dialog validates the input locally (the source of `parseHoursNumber` is
-injected into its script, so client and server apply the same rule), then
-fires `completeTaskMove(hoursInput, context)` via `google.script.run` and
-closes immediately; the move runs in the background and reports success or
-failure through spreadsheet toasts.
-
-The prompt/default logic is factored into pure functions (`parseHoursNumber`,
-`extractHoursEstimates`, `computeDefaultHours`, `buildHoursPromptMessage`,
-`escapeHtml`, `buildHoursDialogHtml`, `buildMoveSuccessMessage`,
-`resolveHoursPlan`) so it can be unit-tested without the Apps Script
-runtime. With Node.js 18+ installed:
+The decision logic is factored into pure functions (`parseHoursNumber`,
+`extractHoursEstimates`, `findInvalidHours`, `planStagedMove`,
+`buildStageToast`, `buildInvalidHoursMessage`, `buildMoveSuccessMessage`,
+`fingerprintRows`, `buildMoveMarker`, `parseMoveMarker`, `markerMatches`)
+so it can be unit-tested without the Apps Script runtime. The pending
+confirmation is stored per user in `CacheService` (no extra OAuth scope
+needed). With Node.js 18+ installed:
 
 ```bash
 npm test

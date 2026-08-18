@@ -4,12 +4,15 @@ const assert = require("node:assert/strict");
 const {
   parseHoursNumber,
   extractHoursEstimates,
-  computeDefaultHours,
-  buildHoursPromptMessage,
-  escapeHtml,
-  buildHoursDialogHtml,
+  findInvalidHours,
+  planStagedMove,
+  buildStageToast,
+  buildInvalidHoursMessage,
   buildMoveSuccessMessage,
-  resolveHoursPlan,
+  fingerprintRows,
+  buildMoveMarker,
+  parseMoveMarker,
+  markerMatches,
 } = require("../Done.js");
 
 test("parseHoursNumber accepts numbers and numeric text", () => {
@@ -33,158 +36,123 @@ test("parseHoursNumber rejects blanks and non-numeric cell types", () => {
   assert.equal(parseHoursNumber(true), null);
 });
 
-test("extractHoursEstimates maps each row's Column E cell to a number or null", () => {
+test("extractHoursEstimates maps each cell to a number or null", () => {
   assert.deepEqual(extractHoursEstimates([[2], [""], ["1.5"], ["abc"]]), [2, null, 1.5, null]);
 });
 
-test("computeDefaultHours sums the numeric estimates of the selection", () => {
-  assert.equal(computeDefaultHours([[2], [3.5]]), 5.5);
+test("findInvalidHours accepts numeric and blank cells", () => {
+  assert.equal(findInvalidHours([[2], [""], ["1.5"], ["  "]]), null);
 });
 
-test("computeDefaultHours works for a single-row selection", () => {
-  assert.equal(computeDefaultHours([[4]]), 4);
+test("findInvalidHours reports the first non-numeric, non-blank cell", () => {
+  assert.deepEqual(findInvalidHours([[2], ["4h"], ["abc"]]), { row: 1, value: "4h" });
 });
 
-test("computeDefaultHours ignores blank and non-numeric cells", () => {
-  assert.equal(computeDefaultHours([[2], [""], ["abc"]]), 2);
+test("planStagedMove moves when every row has numeric hours in Column O", () => {
+  assert.deepEqual(planStagedMove([[1], [2]], [[3], ["4.5"]]),
+    { action: "move", perRowHours: [3, 4.5] });
 });
 
-test("computeDefaultHours returns null when no cell is numeric", () => {
-  assert.equal(computeDefaultHours([[""], ["estimate?"]]), null);
+test("planStagedMove stages estimates into blank Column O cells", () => {
+  assert.deepEqual(planStagedMove([[1], [2.5]], [[""], [""]]),
+    { action: "stage", stagedHours: [1, 2.5], stagedCount: 2 });
 });
 
-test("computeDefaultHours rounds away floating-point noise", () => {
-  assert.equal(computeDefaultHours([[0.1], [0.2]]), 0.3);
+test("planStagedMove keeps existing Column O values when staging", () => {
+  assert.deepEqual(planStagedMove([[1], [2]], [[4], [""]]),
+    { action: "stage", stagedHours: [4, 2], stagedCount: 1 });
 });
 
-test("buildHoursPromptMessage explains the suggestion when one exists", () => {
-  const message = buildHoursPromptMessage(5.5);
-  assert.match(message, /suggested value/);
-  assert.match(message, /Column E/);
+test("planStagedMove leaves rows without an estimate as null", () => {
+  assert.deepEqual(planStagedMove([[""], ["abc"]], [[""], [""]]),
+    { action: "stage", stagedHours: [null, null], stagedCount: 0 });
 });
 
-test("buildHoursPromptMessage omits the suggestion talk when there is none", () => {
-  const message = buildHoursPromptMessage(null);
-  assert.doesNotMatch(message, /suggest/i);
-  assert.doesNotMatch(message, /Column E/);
+test("planStagedMove treats whitespace-only Column O cells as blank", () => {
+  assert.deepEqual(planStagedMove([[2]], [["   "]]),
+    { action: "stage", stagedHours: [2], stagedCount: 1 });
 });
 
-test("escapeHtml escapes HTML metacharacters", () => {
-  assert.equal(
-    escapeHtml('<b>"a" & \'b\'</b>'),
-    "&lt;b&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/b&gt;"
-  );
+test("planStagedMove refuses non-numeric Column O content", () => {
+  assert.deepEqual(planStagedMove([[1], [2]], [["4h"], [""]]),
+    { action: "invalid", row: 0, value: "4h" });
 });
 
-const DIALOG_CONTEXT = { sheetName: "Tasks", startRow: 3, numRows: 2 };
-
-test("buildHoursDialogHtml prefills the input with the suggested total", () => {
-  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
-  assert.match(html, /value="5\.5"/);
+test("planStagedMove accepts an explicit zero in Column O", () => {
+  assert.deepEqual(planStagedMove([[5]], [[0]]),
+    { action: "move", perRowHours: [0] });
 });
 
-test("buildHoursDialogHtml pre-selects the suggestion so typing replaces it", () => {
-  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
-  assert.match(html, /input\.select\(\)/);
+test("buildStageToast asks for confirmation when suggestions were written", () => {
+  assert.match(buildStageToast(2), /adjust them if needed/);
+  assert.match(buildStageToast(2), /press Done again/);
 });
 
-test("buildHoursDialogHtml leaves the input empty when there is no suggestion", () => {
-  const html = buildHoursDialogHtml(null, DIALOG_CONTEXT);
-  assert.match(html, /value=""/);
+test("buildStageToast asks for manual input when nothing could be suggested", () => {
+  assert.match(buildStageToast(0), /Enter the hours/);
+  assert.match(buildStageToast(0), /press Done again/);
 });
 
-test("buildHoursDialogHtml embeds the label and the selection snapshot", () => {
-  const html = buildHoursDialogHtml(4, DIALOG_CONTEXT);
-  assert.match(html, /Column E/);
-  assert.ok(html.includes('{"sheetName":"Tasks","startRow":3,"numRows":2}'));
-  assert.match(html, /completeTaskMove\(/);
+test("buildInvalidHoursMessage names the row and the offending value", () => {
+  const message = buildInvalidHoursMessage(7, "4h");
+  assert.match(message, /row 7/);
+  assert.match(message, /'4h'/);
+  assert.match(message, /not a number/);
 });
 
-test("buildHoursDialogHtml neutralizes a hostile sheet name", () => {
-  const hostile = '</script><script>alert(1)</script>';
-  const html = buildHoursDialogHtml(4, { sheetName: hostile, startRow: 1, numRows: 1 });
-  assert.ok(!html.includes(hostile));
-  assert.ok(html.includes("\\u003c/script>"));
+test("buildMoveSuccessMessage totals the hours of the moved rows", () => {
+  assert.equal(buildMoveSuccessMessage([3.5]), "Moved 1 task to Done; 3.5h recorded.");
+  assert.equal(buildMoveSuccessMessage([1, 2.5]), "Moved 2 tasks to Done; 3.5h recorded.");
 });
 
-test("buildHoursDialogHtml validates locally with the shared parser", () => {
-  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
-  assert.match(html, /function parseHoursNumber/);
-  assert.match(html, /var hasDefault = true;/);
-  assert.match(buildHoursDialogHtml(null, DIALOG_CONTEXT), /var hasDefault = false;/);
+test("buildMoveSuccessMessage rounds away floating-point noise", () => {
+  assert.equal(buildMoveSuccessMessage([0.1, 0.2]), "Moved 2 tasks to Done; 0.3h recorded.");
 });
 
-test("buildHoursDialogHtml fires the move and closes without waiting on it", () => {
-  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
-  assert.match(html, /google\.script\.run\.completeTaskMove\(/);
-  assert.match(html, /google\.script\.host\.close\(\)/);
-  assert.doesNotMatch(html, /withSuccessHandler|withFailureHandler/);
+test("buildMoveSuccessMessage skips blank rows and says so when all are blank", () => {
+  assert.equal(buildMoveSuccessMessage([2, null]), "Moved 2 tasks to Done; 2h recorded.");
+  assert.equal(buildMoveSuccessMessage([null]), "Moved 1 task to Done; no hours recorded.");
 });
 
-test("buildMoveSuccessMessage reports per-row estimates", () => {
-  assert.equal(
-    buildMoveSuccessMessage(2, { perRowHours: [1, 2] }),
-    "Moved 2 tasks to Done; hours taken from Column E."
-  );
+test("fingerprintRows depends on the rows' Column A text", () => {
+  assert.equal(fingerprintRows([["Fix login"], ["Ship v2"]]),
+    fingerprintRows([["Fix login"], ["Ship v2"]]));
+  assert.notEqual(fingerprintRows([["Fix login"]]), fingerprintRows([["Ship v2"]]));
 });
 
-test("buildMoveSuccessMessage reports a single task with typed hours", () => {
-  assert.equal(
-    buildMoveSuccessMessage(1, { sameHours: 3.5 }),
-    "Moved 1 task to Done; 3.5h recorded."
-  );
+test("buildMoveMarker survives a parse round-trip", () => {
+  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
+  assert.equal(marker.sheetName, "Tasks");
+  assert.equal(marker.startRow, 5);
+  assert.equal(marker.numRows, 2);
+  assert.equal(marker.fingerprint, fingerprintRows([["a"], ["b"]]));
 });
 
-test("buildMoveSuccessMessage reports typed hours applied to every row", () => {
-  assert.equal(
-    buildMoveSuccessMessage(3, { sameHours: 2 }),
-    "Moved 3 tasks to Done; 2h recorded on each row."
-  );
+test("parseMoveMarker rejects null, garbage and malformed markers", () => {
+  assert.equal(parseMoveMarker(null), null);
+  assert.equal(parseMoveMarker(""), null);
+  assert.equal(parseMoveMarker("not json"), null);
+  assert.equal(parseMoveMarker("{}"), null);
+  assert.equal(parseMoveMarker(JSON.stringify({ sheetName: "T", startRow: 0, numRows: 1, fingerprint: "[]" })), null);
 });
 
-test("resolveHoursPlan: blank input accepts each row's own estimate", () => {
-  assert.deepEqual(resolveHoursPlan("", [[1], [2.5]]), { perRowHours: [1, 2.5] });
+test("markerMatches accepts the staged rows and one row below (Enter moved the cursor)", () => {
+  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
+  const colA = [["a"], ["b"]];
+  assert.equal(markerMatches(marker, "Tasks", 5, colA), true);
+  assert.equal(markerMatches(marker, "Tasks", 6, colA), true);
+  assert.equal(markerMatches(marker, "Tasks", 7, colA), true);
 });
 
-test("resolveHoursPlan: rows without an estimate stay null in the plan", () => {
-  assert.deepEqual(resolveHoursPlan("", [[1], [""]]), { perRowHours: [1, null] });
+test("markerMatches rejects rows outside the staged block's tolerance", () => {
+  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
+  const colA = [["a"], ["b"]];
+  assert.equal(markerMatches(marker, "Tasks", 4, colA), false);
+  assert.equal(markerMatches(marker, "Tasks", 8, colA), false);
 });
 
-test("resolveHoursPlan: whitespace-only input counts as blank", () => {
-  assert.deepEqual(resolveHoursPlan("   ", [[2]]), { perRowHours: [2] });
-});
-
-test("resolveHoursPlan: blank input is invalid when no estimate exists", () => {
-  assert.equal(resolveHoursPlan("", [[""], ["abc"]]), null);
-});
-
-test("resolveHoursPlan: a typed number overrides the default for every row", () => {
-  assert.deepEqual(resolveHoursPlan("7", [[1], [2]]), { sameHours: 7 });
-});
-
-test("resolveHoursPlan: submitting the suggested total unchanged keeps per-row estimates", () => {
-  assert.deepEqual(resolveHoursPlan("3", [[1], [2]]), { perRowHours: [1, 2] });
-});
-
-test("resolveHoursPlan: the suggested total matches numerically, not textually", () => {
-  assert.deepEqual(resolveHoursPlan("3.0", [[1], [2]]), { perRowHours: [1, 2] });
-  assert.deepEqual(resolveHoursPlan(" 3 ", [[1], [2]]), { perRowHours: [1, 2] });
-});
-
-test("resolveHoursPlan: accepting the suggestion leaves estimate-less rows empty", () => {
-  assert.deepEqual(resolveHoursPlan("2", [[2], [""]]), { perRowHours: [2, null] });
-});
-
-test("resolveHoursPlan: typed decimals and surrounding whitespace are accepted", () => {
-  assert.deepEqual(resolveHoursPlan(" 4.25 ", [[""]]), { sameHours: 4.25 });
-});
-
-test("resolveHoursPlan: an explicit zero is accepted", () => {
-  assert.deepEqual(resolveHoursPlan("0", [[5]]), { sameHours: 0 });
-});
-
-test("resolveHoursPlan: non-numeric input is invalid even with a default", () => {
-  assert.equal(resolveHoursPlan("abc", [[5]]), null);
-  assert.equal(resolveHoursPlan("3 hours", [[5]]), null);
-  assert.equal(resolveHoursPlan("1,5", [[5]]), null);
+test("markerMatches rejects another sheet or shifted rows", () => {
+  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
+  assert.equal(markerMatches(marker, "Other", 5, [["a"], ["b"]]), false);
+  assert.equal(markerMatches(marker, "Tasks", 5, [["b"], ["c"]]), false);
 });
