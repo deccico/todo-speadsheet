@@ -18,7 +18,9 @@ sheet:
    typing a number replaces it. Accepting the suggestion unchanged (or
    clearing the input) gives each moved row its own Column E estimate (rows
    without a numeric estimate are left empty); any other number is written to
-   every moved row.
+   every moved row. OK validates the input inside the dialog and closes it
+   immediately; the move then runs in the background and a toast
+   (bottom-right) reports the result.
 2. Inserts the rows at the top of the **Done** sheet (starting at row 2) and
    clears any bold formatting inherited from the header row.
 3. Writes the completion date/time to **Column N** and the hours to
@@ -56,20 +58,41 @@ source sheet.
 Alternatively, manage the project from this repository with
 [clasp](https://github.com/google/clasp).
 
+## Troubleshooting
+
+**"We're sorry, a server error occurred while reading from storage. Error
+code PERMISSION_DENIED"** — a long-standing Google bug, not a bug in this
+script: when the browser profile is signed into more than one Google
+account, `google.script.run` calls from an HTML dialog can run under the
+wrong account and fail with this error. There is no code-side fix. Sign out
+of the other Google accounts, or open the spreadsheet in a Chrome profile
+(or incognito window) where only the owning account is signed in. Its
+symptom with this script: the dialog closes on OK but the rows stay put and
+no toast appears.
+
+The dialog also takes a moment to open: `HtmlService` dialogs load inside a
+sandboxed iframe, which costs roughly a second. That is inherent to Apps
+Script (the native `ui.prompt` is instant but cannot prefill its text box),
+and is why the dialog validates locally and closes immediately on OK rather
+than staying open while the move runs.
+
 ## Development
 
 Apps Script's `ui.prompt` cannot prefill its text box, so the hours prompt is
 an `HtmlService` modal built from an inline string (`buildHoursDialogHtml`) —
 no separate HTML file, keeping the project a single pasteable file. Because
-`showModalDialog` does not block, `taskIsDone()` only opens the dialog; the
-dialog submits the input back to `completeTaskMove(hoursInput, context)` via
-`google.script.run`, which validates it and performs the move (invalid input
-is shown inside the dialog, which stays open).
+`showModalDialog` does not block, `taskIsDone()` only opens the dialog. The
+dialog validates the input locally (the source of `parseHoursNumber` is
+injected into its script, so client and server apply the same rule), then
+fires `completeTaskMove(hoursInput, context)` via `google.script.run` and
+closes immediately; the move runs in the background and reports success or
+failure through spreadsheet toasts.
 
 The prompt/default logic is factored into pure functions (`parseHoursNumber`,
 `extractHoursEstimates`, `computeDefaultHours`, `buildHoursPromptMessage`,
-`escapeHtml`, `buildHoursDialogHtml`, `resolveHoursPlan`) so it can be
-unit-tested without the Apps Script runtime. With Node.js 18+ installed:
+`escapeHtml`, `buildHoursDialogHtml`, `buildMoveSuccessMessage`,
+`resolveHoursPlan`) so it can be unit-tested without the Apps Script
+runtime. With Node.js 18+ installed:
 
 ```bash
 npm test

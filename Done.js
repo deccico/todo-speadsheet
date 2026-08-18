@@ -92,9 +92,12 @@ function escapeHtml(value) {
  * ui.prompt cannot prefill its text box, so an HtmlService dialog is used
  * instead: the Column E suggestion is written into the input and
  * pre-selected, making OK/Enter accept it while typing replaces it. Built
- * from a string so the project stays a single pasteable file. Submitting
- * calls completeTaskMove(input, context) on the server via
- * google.script.run; a validation error is shown inside the dialog.
+ * from a string so the project stays a single pasteable file. Input is
+ * validated locally (reusing the injected parseHoursNumber source, so
+ * client and server apply the same rule), then completeTaskMove(input,
+ * context) is fired via google.script.run and the dialog closes at once —
+ * the move continues server-side and reports through spreadsheet toasts,
+ * so the dialog never sits waiting on it.
  *
  * @param {?number} defaultHours Total from computeDefaultHours().
  * @param {{sheetName: string, startRow: number, numRows: number}} context
@@ -119,25 +122,26 @@ function buildHoursDialogHtml(defaultHours, context) {
     '</form>' +
     '</div>' +
     '<script>' +
+    parseHoursNumber.toString() + ';' +
     'var context = ' + contextJson + ';' +
+    'var hasDefault = ' + (defaultHours !== null) + ';' +
     'var input = document.getElementById("hours");' +
     'window.setTimeout(function() { input.focus(); input.select(); }, 0);' +
-    'function setBusy(busy) {' +
-    '  document.getElementById("ok").disabled = busy;' +
-    '  document.getElementById("cancel").disabled = busy;' +
-    '}' +
     'document.getElementById("cancel").onclick = function() { google.script.host.close(); };' +
     'document.getElementById("hours-form").onsubmit = function(event) {' +
     '  event.preventDefault();' +
-    '  setBusy(true);' +
-    '  document.getElementById("error").textContent = "";' +
-    '  google.script.run' +
-    '    .withSuccessHandler(function() { google.script.host.close(); })' +
-    '    .withFailureHandler(function(err) {' +
-    '      document.getElementById("error").textContent = (err && err.message) ? err.message : String(err);' +
-    '      setBusy(false);' +
-    '    })' +
-    '    .completeTaskMove(input.value, context);' +
+    '  var trimmed = input.value.trim();' +
+    '  var valid = trimmed === "" ? hasDefault : parseHoursNumber(trimmed) !== null;' +
+    '  if (!valid) {' +
+    '    document.getElementById("error").textContent = "Please enter a numeric value for hours.";' +
+    '    input.focus();' +
+    '    input.select();' +
+    '    return;' +
+    '  }' +
+    '  document.getElementById("ok").disabled = true;' +
+    '  document.getElementById("cancel").disabled = true;' +
+    '  google.script.run.completeTaskMove(input.value, context);' +
+    '  window.setTimeout(function() { google.script.host.close(); }, 100);' +
     '};' +
     '</script>';
 }
@@ -171,6 +175,24 @@ function resolveHoursPlan(hoursInput, columnEValues) {
     return { perRowHours: extractHoursEstimates(columnEValues) };
   }
   return { sameHours: typed };
+}
+
+/**
+ * Builds the confirmation toast shown once the background move finishes —
+ * the dialog closes before the move runs, so the toast is the feedback.
+ *
+ * @param {number} numRows Number of rows moved.
+ * @param {{perRowHours: Array<?number>}|{sameHours: number}} hoursPlan The
+ *     plan produced by resolveHoursPlan().
+ * @return {string} The toast message.
+ */
+function buildMoveSuccessMessage(numRows, hoursPlan) {
+  var tasks = numRows === 1 ? "1 task" : numRows + " tasks";
+  if (hoursPlan.perRowHours) {
+    return "Moved " + tasks + " to Done; hours taken from Column E.";
+  }
+  return "Moved " + tasks + " to Done; " + hoursPlan.sameHours + "h recorded" +
+    (numRows === 1 ? "" : " on each row") + ".";
 }
 
 /**
@@ -219,8 +241,9 @@ function taskIsDone() {
 /**
  * Called by the hours dialog via google.script.run. Moves the snapshotted
  * selection to the Done sheet, writing the completion timestamp to Column N
- * and the resolved hours to Column O. Throws on invalid input so the dialog
- * shows the message and stays open for a correction.
+ * and the resolved hours to Column O. The dialog has already closed by the
+ * time this runs, so success and failure are both reported through
+ * spreadsheet toasts.
  *
  * @param {string} hoursInput Raw text from the dialog input.
  * @param {{sheetName: string, startRow: number, numRows: number}} context
@@ -232,13 +255,15 @@ function completeTaskMove(hoursInput, context) {
   var targetSheet = ss.getSheetByName("Done");
 
   if (!sourceSheet || !targetSheet) {
-    throw new Error("The source or Done sheet no longer exists.");
+    ss.toast("The source or Done sheet no longer exists.", "Tasks NOT moved", 8);
+    return;
   }
 
   var startRow = context.startRow;
   var numRows = context.numRows;
   if (!(startRow >= 1) || !(numRows >= 1)) {
-    throw new Error("The selection is no longer valid. Please try again.");
+    ss.toast("The selection is no longer valid. Please try again.", "Tasks NOT moved", 8);
+    return;
   }
 
   var numCols = sourceSheet.getLastColumn();
@@ -247,7 +272,8 @@ function completeTaskMove(hoursInput, context) {
   var colEValues = sourceSheet.getRange(startRow, 5, numRows, 1).getValues();
   var hoursPlan = resolveHoursPlan(hoursInput, colEValues);
   if (hoursPlan === null) {
-    throw new Error("You must enter a numeric value for hours.");
+    ss.toast("You must enter a numeric value for hours.", "Tasks NOT moved", 8);
+    return;
   }
 
   // Get the data from the selected rows
@@ -282,6 +308,8 @@ function completeTaskMove(hoursInput, context) {
 
   // Delete the original rows from the source sheet
   sourceSheet.deleteRows(startRow, numRows);
+
+  ss.toast(buildMoveSuccessMessage(numRows, hoursPlan), "Done", 5);
 }
 
 function moveToProjectsSheet() {
@@ -335,6 +363,7 @@ if (typeof module !== "undefined" && module.exports) {
     buildHoursPromptMessage: buildHoursPromptMessage,
     escapeHtml: escapeHtml,
     buildHoursDialogHtml: buildHoursDialogHtml,
+    buildMoveSuccessMessage: buildMoveSuccessMessage,
     resolveHoursPlan: resolveHoursPlan
   };
 }

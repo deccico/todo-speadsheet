@@ -8,6 +8,7 @@ const {
   buildHoursPromptMessage,
   escapeHtml,
   buildHoursDialogHtml,
+  buildMoveSuccessMessage,
   resolveHoursPlan,
 } = require("../Done.js");
 
@@ -104,6 +105,41 @@ test("buildHoursDialogHtml neutralizes a hostile sheet name", () => {
   const html = buildHoursDialogHtml(4, { sheetName: hostile, startRow: 1, numRows: 1 });
   assert.ok(!html.includes(hostile));
   assert.ok(html.includes("\\u003c/script>"));
+});
+
+test("buildHoursDialogHtml validates locally with the shared parser", () => {
+  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
+  assert.match(html, /function parseHoursNumber/);
+  assert.match(html, /var hasDefault = true;/);
+  assert.match(buildHoursDialogHtml(null, DIALOG_CONTEXT), /var hasDefault = false;/);
+});
+
+test("buildHoursDialogHtml fires the move and closes without waiting on it", () => {
+  const html = buildHoursDialogHtml(5.5, DIALOG_CONTEXT);
+  assert.match(html, /google\.script\.run\.completeTaskMove\(/);
+  assert.match(html, /google\.script\.host\.close\(\)/);
+  assert.doesNotMatch(html, /withSuccessHandler|withFailureHandler/);
+});
+
+test("buildMoveSuccessMessage reports per-row estimates", () => {
+  assert.equal(
+    buildMoveSuccessMessage(2, { perRowHours: [1, 2] }),
+    "Moved 2 tasks to Done; hours taken from Column E."
+  );
+});
+
+test("buildMoveSuccessMessage reports a single task with typed hours", () => {
+  assert.equal(
+    buildMoveSuccessMessage(1, { sameHours: 3.5 }),
+    "Moved 1 task to Done; 3.5h recorded."
+  );
+});
+
+test("buildMoveSuccessMessage reports typed hours applied to every row", () => {
+  assert.equal(
+    buildMoveSuccessMessage(3, { sameHours: 2 }),
+    "Moved 3 tasks to Done; 2h recorded on each row."
+  );
 });
 
 test("resolveHoursPlan: blank input accepts each row's own estimate", () => {
