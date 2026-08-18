@@ -1,11 +1,7 @@
 // Column layout shared by the task sheets and the Done sheet
 var ESTIMATE_COLUMN = 5;   // Column E: the hours estimate on task sheets
 var TIMESTAMP_COLUMN = 14; // Column N: completion date/time on the Done sheet
-var HOURS_COLUMN = 15;     // Column O: hours input on task sheets, recorded hours on Done
-
-// The pending two-press move, remembered between button presses
-var MOVE_MARKER_KEY = "pendingDoneMove";
-var MOVE_MARKER_TTL_SECONDS = 300;
+var HOURS_COLUMN = 15;     // Column O: recorded hours on the Done sheet
 
 /**
  * Strictly parses a single hours value. Unlike parseFloat, trailing garbage
@@ -28,217 +24,151 @@ function parseHoursNumber(value) {
 }
 
 /**
- * Maps one column of cells from the selection to one number per row.
+ * Maps the Column E cells of the selection to one hours estimate per row.
  *
- * @param {Array<Array>} columnValues Values as returned by Range.getValues().
- * @return {Array<?number>} One value per row; null where the cell holds no number.
+ * @param {Array<Array>} columnEValues Values as returned by Range.getValues().
+ * @return {Array<?number>} One estimate per row; null where the cell holds no number.
  */
-function extractHoursEstimates(columnValues) {
+function extractHoursEstimates(columnEValues) {
   var estimates = [];
-  for (var i = 0; i < columnValues.length; i++) {
-    estimates.push(parseHoursNumber(columnValues[i][0]));
+  for (var i = 0; i < columnEValues.length; i++) {
+    estimates.push(parseHoursNumber(columnEValues[i][0]));
   }
   return estimates;
 }
 
 /**
- * Finds the first Column O cell that holds something non-blank that is not a
- * number ("4h", "1,5") — such a cell blocks the move until fixed.
+ * Total of the Column E estimates, rounded to 2 decimals — shown in the
+ * prompt as the default. Null when the selection has no numeric estimate.
  *
- * @param {Array<Array>} oValues Column O values of the rows to move.
- * @return {?{row: number, value: *}} Zero-based row and offending value, or
- *     null when every cell is numeric or blank.
+ * @param {Array<Array>} columnEValues Values as returned by Range.getValues().
+ * @return {?number} The default total hours, or null when unavailable.
  */
-function findInvalidHours(oValues) {
-  for (var i = 0; i < oValues.length; i++) {
-    if (parseHoursNumber(oValues[i][0]) === null && String(oValues[i][0]).trim() !== "") {
-      return { row: i, value: oValues[i][0] };
-    }
-  }
-  return null;
-}
-
-/**
- * Decides what pressing the Done button should do for the selection, from
- * its Column E (estimates) and Column O (hours input) values:
- *
- * - "invalid": some Column O cell holds a non-number — nothing can happen
- *   until it is fixed.
- * - "move": every row already has numeric hours in Column O — move now.
- * - "stage": suggest hours first. stagedHours holds, per row, the existing
- *   Column O number, else the Column E estimate, else null; stagedCount is
- *   how many blank cells a suggestion exists for.
- *
- * @param {Array<Array>} eValues Column E values of the selection.
- * @param {Array<Array>} oValues Column O values of the selection.
- * @return {{action: string}} The plan, shaped as described above.
- */
-function planStagedMove(eValues, oValues) {
-  var invalid = findInvalidHours(oValues);
-  if (invalid) {
-    return { action: "invalid", row: invalid.row, value: invalid.value };
-  }
-  var estimates = extractHoursEstimates(eValues);
-  var hours = extractHoursEstimates(oValues);
-  var stagedHours = [];
-  var stagedCount = 0;
-  var allNumeric = true;
-  for (var i = 0; i < hours.length; i++) {
-    if (hours[i] !== null) {
-      stagedHours.push(hours[i]);
-      continue;
-    }
-    allNumeric = false;
-    if (estimates[i] !== null) {
-      stagedHours.push(estimates[i]);
-      stagedCount++;
-    } else {
-      stagedHours.push(null);
-    }
-  }
-  if (allNumeric) {
-    return { action: "move", perRowHours: stagedHours };
-  }
-  return { action: "stage", stagedHours: stagedHours, stagedCount: stagedCount };
-}
-
-/**
- * Builds the toast shown after suggestions were written to Column O.
- *
- * @param {number} stagedCount How many cells received a suggestion.
- * @return {string} The toast message.
- */
-function buildStageToast(stagedCount) {
-  if (stagedCount === 0) {
-    return "Enter the hours in Column O (now selected), then press Done again to move.";
-  }
-  return "Suggested hours from Column E are in Column O — adjust them if needed, then press Done again to move.";
-}
-
-/**
- * Builds the refusal toast for a non-numeric Column O cell.
- *
- * @param {number} sheetRow 1-based sheet row of the offending cell.
- * @param {*} value The offending cell value.
- * @return {string} The toast message.
- */
-function buildInvalidHoursMessage(sheetRow, value) {
-  return "Column O of row " + sheetRow + " contains '" + value +
-    "', which is not a number. Fix it and press Done again.";
-}
-
-/**
- * Builds the confirmation toast shown once the rows were moved.
- *
- * @param {Array<?number>} perRowHours The hours recorded per moved row.
- * @return {string} The toast message.
- */
-function buildMoveSuccessMessage(perRowHours) {
+function computeDefaultHours(columnEValues) {
+  var estimates = extractHoursEstimates(columnEValues);
   var total = 0;
-  var counted = 0;
-  for (var i = 0; i < perRowHours.length; i++) {
-    if (perRowHours[i] !== null) {
-      total += perRowHours[i];
-      counted++;
+  var found = false;
+  for (var i = 0; i < estimates.length; i++) {
+    if (estimates[i] !== null) {
+      total += estimates[i];
+      found = true;
     }
   }
-  var tasks = perRowHours.length === 1 ? "1 task" : perRowHours.length + " tasks";
-  if (counted === 0) {
-    return "Moved " + tasks + " to Done; no hours recorded.";
-  }
-  return "Moved " + tasks + " to Done; " + (Math.round(total * 100) / 100) + "h recorded.";
-}
-
-/**
- * Fingerprints the rows about to move by their Column A text (the task
- * detail), so a pending confirmation is dropped if rows shifted in between.
- *
- * @param {Array<Array>} colAValues Column A values of the rows.
- * @return {string} A stable fingerprint.
- */
-function fingerprintRows(colAValues) {
-  var texts = [];
-  for (var i = 0; i < colAValues.length; i++) {
-    texts.push(String(colAValues[i][0]));
-  }
-  return JSON.stringify(texts);
-}
-
-/**
- * Serializes the pending move for CacheService.
- *
- * @param {string} sheetName Sheet the staged rows are on.
- * @param {number} startRow First staged row.
- * @param {number} numRows Number of staged rows.
- * @param {Array<Array>} colAValues Column A values of the staged rows.
- * @return {string} The marker JSON.
- */
-function buildMoveMarker(sheetName, startRow, numRows, colAValues) {
-  return JSON.stringify({
-    sheetName: sheetName,
-    startRow: startRow,
-    numRows: numRows,
-    fingerprint: fingerprintRows(colAValues)
-  });
-}
-
-/**
- * Parses a stored marker, rejecting anything malformed.
- *
- * @param {?string} markerJson Value read from CacheService, possibly null.
- * @return {?Object} The marker, or null when absent or invalid.
- */
-function parseMoveMarker(markerJson) {
-  if (!markerJson) {
+  if (!found) {
     return null;
   }
-  var marker;
-  try {
-    marker = JSON.parse(markerJson);
-  } catch (e) {
-    return null;
-  }
-  if (!marker || typeof marker.sheetName !== "string" ||
-      typeof marker.fingerprint !== "string" ||
-      !(marker.startRow >= 1) || !(marker.numRows >= 1)) {
-    return null;
-  }
-  return marker;
+  return Math.round(total * 100) / 100;
 }
 
 /**
- * Whether the current button press confirms the pending move. The active row
- * may be one row BELOW the staged rows because pressing Enter after typing
- * in Column O advances the cursor; the fingerprint guarantees the staged
- * rows themselves did not shift.
+ * Builds the prompt message, mentioning the Column E default when one
+ * exists. Kept short so it is quick to read.
  *
- * @param {Object} marker Marker from parseMoveMarker().
- * @param {string} sheetName The active sheet's name.
- * @param {number} activeRow The active range's first row.
- * @param {Array<Array>} colAValues Current Column A values at the marker rows.
- * @return {boolean} True when the press should complete the pending move.
+ * @param {?number} defaultHours Total from computeDefaultHours().
+ * @return {string} The message for ui.prompt().
  */
-function markerMatches(marker, sheetName, activeRow, colAValues) {
-  return marker.sheetName === sheetName &&
-    activeRow >= marker.startRow &&
-    activeRow <= marker.startRow + marker.numRows &&
-    fingerprintRows(colAValues) === marker.fingerprint;
+function buildHoursPromptMessage(defaultHours) {
+  if (defaultHours === null) {
+    return 'Enter the hours spent:';
+  }
+  return 'Enter the hours spent, or leave blank to use the Column E estimate ' +
+    '(total: ' + defaultHours + '):';
 }
 
 /**
- * Moves the selected row(s) to the Done sheet using a two-press flow with
- * the sheet itself as the hours input — no dialogs, no HtmlService and no
- * google.script.run (ui.prompt cannot prefill its text box, and HTML
- * dialogs break with PERMISSION_DENIED when several Google accounts are
- * signed in, so the suggestion is prefilled into Column O natively):
+ * Turns the prompt response into a write plan for Column O of the Done sheet.
+ * Blank input accepts the Column E estimates: each row receives its own
+ * estimate (rows without one are left empty). A typed number is written to
+ * every moved row.
  *
- * 1st press: writes each selected row's Column E estimate into its blank
- * Column O cell, selects those cells and asks for confirmation via toast.
- * Existing Column O values are never overwritten.
+ * @param {string} hoursInput Raw text the user typed in the prompt.
+ * @param {Array<Array>} columnEValues Column E values of the selection.
+ * @return {?{perRowHours: Array<?number>}|{sameHours: number}} The plan, or
+ *     null when the input is invalid (non-numeric, or blank with no default).
+ */
+function resolveHoursPlan(hoursInput, columnEValues) {
+  var trimmed = String(hoursInput).trim();
+  if (trimmed === "") {
+    if (computeDefaultHours(columnEValues) === null) {
+      return null;
+    }
+    return { perRowHours: extractHoursEstimates(columnEValues) };
+  }
+  var typed = parseHoursNumber(trimmed);
+  if (typed === null) {
+    return null;
+  }
+  return { sameHours: typed };
+}
+
+/**
+ * Expands a resolved hours plan to one value per row.
  *
- * 2nd press: moves the rows using whatever Column O now holds. If every
- * selected row already had numeric hours in Column O, the first press moves
- * immediately.
+ * @param {{perRowHours: Array<?number>}|{sameHours: number}} hoursPlan
+ *     Plan from resolveHoursPlan().
+ * @param {number} numRows Number of rows being moved.
+ * @return {Array<?number>} The hours to record, one entry per row.
+ */
+function planToPerRowHours(hoursPlan, numRows) {
+  if (hoursPlan.perRowHours) {
+    return hoursPlan.perRowHours;
+  }
+  var hours = [];
+  for (var i = 0; i < numRows; i++) {
+    hours.push(hoursPlan.sameHours);
+  }
+  return hours;
+}
+
+/**
+ * Builds the complete row values written to the Done sheet: the copied data
+ * padded out to Column O, with the completion timestamp in Column N and the
+ * hours in Column O. Producing everything up front lets the move use a
+ * single setValues call instead of three separate writes, which is
+ * noticeably quicker.
+ *
+ * @param {Array<Array>} dataRows The selected rows' values.
+ * @param {*} timestamp The completion date/time.
+ * @param {Array<?number>} perRowHours Hours per row; null leaves the cell empty.
+ * @return {Array<Array>} The values for the Done sheet, one array per row.
+ */
+function buildDoneRows(dataRows, timestamp, perRowHours) {
+  var width = Math.max(dataRows[0].length, HOURS_COLUMN);
+  var out = [];
+  for (var i = 0; i < dataRows.length; i++) {
+    var row = dataRows[i].slice();
+    while (row.length < width) {
+      row.push("");
+    }
+    row[TIMESTAMP_COLUMN - 1] = timestamp;
+    row[HOURS_COLUMN - 1] = perRowHours[i] === null ? "" : perRowHours[i];
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Inserts the given values directly under targetSheet's header block and
+ * strips the bold formatting inherited from the row above. Shared by the
+ * Done and Projects moves; the caller deletes the source rows.
+ *
+ * @param {number} headerRows Rows to insert after (1 for Done, 4 for Projects).
+ * @param {Array<Array>} rowValues The values to write, one array per row.
+ */
+function insertRowsBelowHeader(targetSheet, headerRows, rowValues) {
+  var numRows = rowValues.length;
+  targetSheet.insertRowsAfter(headerRows, numRows);
+  targetSheet.getRange(headerRows + 1, 1, numRows, rowValues[0].length).setValues(rowValues);
+  targetSheet.getRange(headerRows + 1, 1, numRows, targetSheet.getMaxColumns()).setFontWeight("normal");
+}
+
+/**
+ * Moves the selected row(s) to the Done sheet: prompts for the hours spent
+ * (blank accepts the Column E estimates), inserts the rows at the top of
+ * the Done sheet with the completion timestamp in Column N and the hours in
+ * Column O, and deletes the originals. Fully native ui.prompt — no
+ * HtmlService and no google.script.run, so it is fast and unaffected by
+ * Google's multi-account PERMISSION_DENIED bug.
  */
 function taskIsDone() {
   var ui = SpreadsheetApp.getUi();
@@ -262,112 +192,37 @@ function taskIsDone() {
   var startRow = activeRange.getRow();
   var numRows = activeRange.getNumRows();
 
-  if (sourceSheet.getLastColumn() === 0) return;
-
-  // A pending confirmation for these rows? Complete it — even if typing in
-  // Column O moved the cursor one row down.
-  var cache = CacheService.getUserCache();
-  var marker = parseMoveMarker(cache.get(MOVE_MARKER_KEY));
-  if (marker && marker.sheetName === sourceSheet.getName() &&
-      marker.startRow + marker.numRows - 1 <= sourceSheet.getLastRow()) {
-    var markerColA = sourceSheet.getRange(marker.startRow, 1, marker.numRows, 1).getValues();
-    if (markerMatches(marker, sourceSheet.getName(), startRow, markerColA)) {
-      confirmPendingMove(ss, sourceSheet, targetSheet, marker, cache);
-      return;
-    }
-  }
-  if (marker) {
-    cache.remove(MOVE_MARKER_KEY);
-  }
-
-  var eValues = sourceSheet.getRange(startRow, ESTIMATE_COLUMN, numRows, 1).getValues();
-  var oRange = sourceSheet.getRange(startRow, HOURS_COLUMN, numRows, 1);
-  var oValues = oRange.getValues();
-  var plan = planStagedMove(eValues, oValues);
-
-  if (plan.action === "invalid") {
-    ss.toast(buildInvalidHoursMessage(startRow + plan.row, plan.value), "Tasks NOT moved", 8);
-    return;
-  }
-
-  if (plan.action === "move") {
-    // Every row already has numeric hours in Column O — no confirmation needed
-    moveRowsToDone(ss, sourceSheet, targetSheet, startRow, numRows, plan.perRowHours);
-    return;
-  }
-
-  // Stage: suggest hours in the blank Column O cells and ask to confirm
-  for (var i = 0; i < plan.stagedHours.length; i++) {
-    if (String(oValues[i][0]).trim() === "" && plan.stagedHours[i] !== null) {
-      oRange.getCell(i + 1, 1).setValue(plan.stagedHours[i]);
-    }
-  }
-  oRange.activate();
-  var colAValues = sourceSheet.getRange(startRow, 1, numRows, 1).getValues();
-  cache.put(MOVE_MARKER_KEY,
-    buildMoveMarker(sourceSheet.getName(), startRow, numRows, colAValues),
-    MOVE_MARKER_TTL_SECONDS);
-  ss.toast(buildStageToast(plan.stagedCount), "Confirm hours", 8);
-}
-
-/**
- * Completes a pending two-press move: records whatever Column O now holds.
- * Blank cells are accepted as "no hours" — the user saw them highlighted
- * and pressed again — but a non-numeric cell still refuses the move (and
- * keeps the confirmation pending so fixing it and pressing again works).
- */
-function confirmPendingMove(ss, sourceSheet, targetSheet, marker, cache) {
-  var oValues = sourceSheet.getRange(marker.startRow, HOURS_COLUMN, marker.numRows, 1).getValues();
-  var invalid = findInvalidHours(oValues);
-  if (invalid) {
-    ss.toast(buildInvalidHoursMessage(marker.startRow + invalid.row, invalid.value), "Tasks NOT moved", 8);
-    return;
-  }
-  cache.remove(MOVE_MARKER_KEY);
-  moveRowsToDone(ss, sourceSheet, targetSheet, marker.startRow, marker.numRows,
-    extractHoursEstimates(oValues));
-}
-
-/**
- * Copies rows into targetSheet directly under its header block and strips
- * the bold formatting inherited from the row above. Shared by the Done and
- * Projects moves; the caller deletes the source rows.
- *
- * @param {number} headerRows Rows to insert after (1 for Done, 4 for Projects).
- */
-function copyRowsBelowHeader(sourceSheet, targetSheet, startRow, numRows, headerRows) {
   var numCols = sourceSheet.getLastColumn();
+  if (numCols === 0) return;
+
+  // One read serves both the Column E default and the later copy
   var dataToMove = sourceSheet.getRange(startRow, 1, numRows, numCols).getValues();
-  targetSheet.insertRowsAfter(headerRows, numRows);
-  targetSheet.getRange(headerRows + 1, 1, numRows, numCols).setValues(dataToMove);
-  targetSheet.getRange(headerRows + 1, 1, numRows, targetSheet.getMaxColumns()).setFontWeight("normal");
-}
-
-/**
- * Moves the rows to the Done sheet, writing the completion timestamp to
- * Column N and the given hours to Column O, then deletes the originals and
- * confirms with a toast.
- *
- * @param {Array<?number>} perRowHours Hours per row; null leaves the cell empty.
- */
-function moveRowsToDone(ss, sourceSheet, targetSheet, startRow, numRows, perRowHours) {
-  copyRowsBelowHeader(sourceSheet, targetSheet, startRow, numRows, 1);
-
-  // Add the current date and time to Column N
-  var timestamp = new Date();
-  targetSheet.getRange(2, TIMESTAMP_COLUMN, numRows, 1).setValue(timestamp);
-
-  // Add the hours to Column O
-  var hoursColumn = [];
-  for (var i = 0; i < perRowHours.length; i++) {
-    hoursColumn.push([perRowHours[i] === null ? "" : perRowHours[i]]);
+  var colEValues = [];
+  for (var i = 0; i < dataToMove.length; i++) {
+    colEValues.push([numCols >= ESTIMATE_COLUMN ? dataToMove[i][ESTIMATE_COLUMN - 1] : ""]);
   }
-  targetSheet.getRange(2, HOURS_COLUMN, numRows, 1).setValues(hoursColumn);
+  var defaultHours = computeDefaultHours(colEValues);
+
+  // Prompt the user for the hours (Enter accepts, blank uses the default)
+  var response = ui.prompt('Total Hours', buildHoursPromptMessage(defaultHours), ui.ButtonSet.OK_CANCEL);
+
+  // User clicked Cancel or closed the dialog box
+  if (response.getSelectedButton() != ui.Button.OK) {
+    return;
+  }
+
+  var hoursPlan = resolveHoursPlan(response.getResponseText(), colEValues);
+  if (hoursPlan === null) {
+    ui.alert('Invalid input', 'You must enter a numeric value for hours. Operation cancelled.', ui.ButtonSet.OK);
+    return;
+  }
+
+  // Single write: data + timestamp (Column N) + hours (Column O) together
+  var doneRows = buildDoneRows(dataToMove, new Date(), planToPerRowHours(hoursPlan, numRows));
+  insertRowsBelowHeader(targetSheet, 1, doneRows);
 
   // Delete the original rows from the source sheet
   sourceSheet.deleteRows(startRow, numRows);
-
-  ss.toast(buildMoveSuccessMessage(perRowHours), "Done", 5);
 }
 
 function moveToProjectsSheet() {
@@ -391,9 +246,11 @@ function moveToProjectsSheet() {
   var startRow = activeRange.getRow();
   var numRows = activeRange.getNumRows();
 
-  if (sourceSheet.getLastColumn() === 0) return;
+  var numCols = sourceSheet.getLastColumn();
+  if (numCols === 0) return;
 
-  copyRowsBelowHeader(sourceSheet, targetSheet, startRow, numRows, 4);
+  var dataToMove = sourceSheet.getRange(startRow, 1, numRows, numCols).getValues();
+  insertRowsBelowHeader(targetSheet, 4, dataToMove);
 
   // Delete the original rows from the source sheet
   sourceSheet.deleteRows(startRow, numRows);
@@ -405,14 +262,10 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     parseHoursNumber: parseHoursNumber,
     extractHoursEstimates: extractHoursEstimates,
-    findInvalidHours: findInvalidHours,
-    planStagedMove: planStagedMove,
-    buildStageToast: buildStageToast,
-    buildInvalidHoursMessage: buildInvalidHoursMessage,
-    buildMoveSuccessMessage: buildMoveSuccessMessage,
-    fingerprintRows: fingerprintRows,
-    buildMoveMarker: buildMoveMarker,
-    parseMoveMarker: parseMoveMarker,
-    markerMatches: markerMatches
+    computeDefaultHours: computeDefaultHours,
+    buildHoursPromptMessage: buildHoursPromptMessage,
+    resolveHoursPlan: resolveHoursPlan,
+    planToPerRowHours: planToPerRowHours,
+    buildDoneRows: buildDoneRows
   };
 }

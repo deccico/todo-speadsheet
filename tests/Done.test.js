@@ -4,15 +4,11 @@ const assert = require("node:assert/strict");
 const {
   parseHoursNumber,
   extractHoursEstimates,
-  findInvalidHours,
-  planStagedMove,
-  buildStageToast,
-  buildInvalidHoursMessage,
-  buildMoveSuccessMessage,
-  fingerprintRows,
-  buildMoveMarker,
-  parseMoveMarker,
-  markerMatches,
+  computeDefaultHours,
+  buildHoursPromptMessage,
+  resolveHoursPlan,
+  planToPerRowHours,
+  buildDoneRows,
 } = require("../Done.js");
 
 test("parseHoursNumber accepts numbers and numeric text", () => {
@@ -36,123 +32,108 @@ test("parseHoursNumber rejects blanks and non-numeric cell types", () => {
   assert.equal(parseHoursNumber(true), null);
 });
 
-test("extractHoursEstimates maps each cell to a number or null", () => {
+test("extractHoursEstimates maps each row's Column E cell to a number or null", () => {
   assert.deepEqual(extractHoursEstimates([[2], [""], ["1.5"], ["abc"]]), [2, null, 1.5, null]);
 });
 
-test("findInvalidHours accepts numeric and blank cells", () => {
-  assert.equal(findInvalidHours([[2], [""], ["1.5"], ["  "]]), null);
+test("computeDefaultHours sums the numeric estimates of the selection", () => {
+  assert.equal(computeDefaultHours([[2], [3.5]]), 5.5);
 });
 
-test("findInvalidHours reports the first non-numeric, non-blank cell", () => {
-  assert.deepEqual(findInvalidHours([[2], ["4h"], ["abc"]]), { row: 1, value: "4h" });
+test("computeDefaultHours works for a single-row selection", () => {
+  assert.equal(computeDefaultHours([[4]]), 4);
 });
 
-test("planStagedMove moves when every row has numeric hours in Column O", () => {
-  assert.deepEqual(planStagedMove([[1], [2]], [[3], ["4.5"]]),
-    { action: "move", perRowHours: [3, 4.5] });
+test("computeDefaultHours ignores blank and non-numeric cells", () => {
+  assert.equal(computeDefaultHours([[2], [""], ["abc"]]), 2);
 });
 
-test("planStagedMove stages estimates into blank Column O cells", () => {
-  assert.deepEqual(planStagedMove([[1], [2.5]], [[""], [""]]),
-    { action: "stage", stagedHours: [1, 2.5], stagedCount: 2 });
+test("computeDefaultHours returns null when no cell is numeric", () => {
+  assert.equal(computeDefaultHours([[""], ["estimate?"]]), null);
 });
 
-test("planStagedMove keeps existing Column O values when staging", () => {
-  assert.deepEqual(planStagedMove([[1], [2]], [[4], [""]]),
-    { action: "stage", stagedHours: [4, 2], stagedCount: 1 });
+test("computeDefaultHours rounds away floating-point noise", () => {
+  assert.equal(computeDefaultHours([[0.1], [0.2]]), 0.3);
 });
 
-test("planStagedMove leaves rows without an estimate as null", () => {
-  assert.deepEqual(planStagedMove([[""], ["abc"]], [[""], [""]]),
-    { action: "stage", stagedHours: [null, null], stagedCount: 0 });
+test("buildHoursPromptMessage mentions the default when one exists", () => {
+  assert.match(buildHoursPromptMessage(5.5), /leave blank/);
+  assert.match(buildHoursPromptMessage(5.5), /total: 5\.5/);
 });
 
-test("planStagedMove treats whitespace-only Column O cells as blank", () => {
-  assert.deepEqual(planStagedMove([[2]], [["   "]]),
-    { action: "stage", stagedHours: [2], stagedCount: 1 });
+test("buildHoursPromptMessage omits the default when there is none", () => {
+  const message = buildHoursPromptMessage(null);
+  assert.doesNotMatch(message, /blank/);
+  assert.doesNotMatch(message, /default/);
 });
 
-test("planStagedMove refuses non-numeric Column O content", () => {
-  assert.deepEqual(planStagedMove([[1], [2]], [["4h"], [""]]),
-    { action: "invalid", row: 0, value: "4h" });
+test("resolveHoursPlan: blank input accepts each row's own estimate", () => {
+  assert.deepEqual(resolveHoursPlan("", [[1], [2.5]]), { perRowHours: [1, 2.5] });
 });
 
-test("planStagedMove accepts an explicit zero in Column O", () => {
-  assert.deepEqual(planStagedMove([[5]], [[0]]),
-    { action: "move", perRowHours: [0] });
+test("resolveHoursPlan: rows without an estimate stay null in the plan", () => {
+  assert.deepEqual(resolveHoursPlan("", [[1], [""]]), { perRowHours: [1, null] });
 });
 
-test("buildStageToast asks for confirmation when suggestions were written", () => {
-  assert.match(buildStageToast(2), /adjust them if needed/);
-  assert.match(buildStageToast(2), /press Done again/);
+test("resolveHoursPlan: whitespace-only input counts as blank", () => {
+  assert.deepEqual(resolveHoursPlan("   ", [[2]]), { perRowHours: [2] });
 });
 
-test("buildStageToast asks for manual input when nothing could be suggested", () => {
-  assert.match(buildStageToast(0), /Enter the hours/);
-  assert.match(buildStageToast(0), /press Done again/);
+test("resolveHoursPlan: blank input is invalid when no estimate exists", () => {
+  assert.equal(resolveHoursPlan("", [[""], ["abc"]]), null);
 });
 
-test("buildInvalidHoursMessage names the row and the offending value", () => {
-  const message = buildInvalidHoursMessage(7, "4h");
-  assert.match(message, /row 7/);
-  assert.match(message, /'4h'/);
-  assert.match(message, /not a number/);
+test("resolveHoursPlan: a typed number overrides the default for every row", () => {
+  assert.deepEqual(resolveHoursPlan("7", [[1], [2]]), { sameHours: 7 });
 });
 
-test("buildMoveSuccessMessage totals the hours of the moved rows", () => {
-  assert.equal(buildMoveSuccessMessage([3.5]), "Moved 1 task to Done; 3.5h recorded.");
-  assert.equal(buildMoveSuccessMessage([1, 2.5]), "Moved 2 tasks to Done; 3.5h recorded.");
+test("resolveHoursPlan: typed decimals and surrounding whitespace are accepted", () => {
+  assert.deepEqual(resolveHoursPlan(" 4.25 ", [[""]]), { sameHours: 4.25 });
 });
 
-test("buildMoveSuccessMessage rounds away floating-point noise", () => {
-  assert.equal(buildMoveSuccessMessage([0.1, 0.2]), "Moved 2 tasks to Done; 0.3h recorded.");
+test("resolveHoursPlan: an explicit zero is accepted", () => {
+  assert.deepEqual(resolveHoursPlan("0", [[5]]), { sameHours: 0 });
 });
 
-test("buildMoveSuccessMessage skips blank rows and says so when all are blank", () => {
-  assert.equal(buildMoveSuccessMessage([2, null]), "Moved 2 tasks to Done; 2h recorded.");
-  assert.equal(buildMoveSuccessMessage([null]), "Moved 1 task to Done; no hours recorded.");
+test("resolveHoursPlan: non-numeric input is invalid even with a default", () => {
+  assert.equal(resolveHoursPlan("abc", [[5]]), null);
+  assert.equal(resolveHoursPlan("3 hours", [[5]]), null);
+  assert.equal(resolveHoursPlan("1,5", [[5]]), null);
 });
 
-test("fingerprintRows depends on the rows' Column A text", () => {
-  assert.equal(fingerprintRows([["Fix login"], ["Ship v2"]]),
-    fingerprintRows([["Fix login"], ["Ship v2"]]));
-  assert.notEqual(fingerprintRows([["Fix login"]]), fingerprintRows([["Ship v2"]]));
+test("planToPerRowHours passes per-row plans through", () => {
+  assert.deepEqual(planToPerRowHours({ perRowHours: [1, null, 2] }, 3), [1, null, 2]);
 });
 
-test("buildMoveMarker survives a parse round-trip", () => {
-  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
-  assert.equal(marker.sheetName, "Tasks");
-  assert.equal(marker.startRow, 5);
-  assert.equal(marker.numRows, 2);
-  assert.equal(marker.fingerprint, fingerprintRows([["a"], ["b"]]));
+test("planToPerRowHours repeats a typed number for every row", () => {
+  assert.deepEqual(planToPerRowHours({ sameHours: 4 }, 3), [4, 4, 4]);
 });
 
-test("parseMoveMarker rejects null, garbage and malformed markers", () => {
-  assert.equal(parseMoveMarker(null), null);
-  assert.equal(parseMoveMarker(""), null);
-  assert.equal(parseMoveMarker("not json"), null);
-  assert.equal(parseMoveMarker("{}"), null);
-  assert.equal(parseMoveMarker(JSON.stringify({ sheetName: "T", startRow: 0, numRows: 1, fingerprint: "[]" })), null);
+test("buildDoneRows pads rows to Column O and fills timestamp and hours", () => {
+  const rows = buildDoneRows([["task", "b", "c"]], "TS", [3.5]);
+  assert.equal(rows[0].length, 15);
+  assert.equal(rows[0][0], "task");
+  assert.equal(rows[0][13], "TS"); // Column N
+  assert.equal(rows[0][14], 3.5);  // Column O
 });
 
-test("markerMatches accepts the staged rows and one row below (Enter moved the cursor)", () => {
-  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
-  const colA = [["a"], ["b"]];
-  assert.equal(markerMatches(marker, "Tasks", 5, colA), true);
-  assert.equal(markerMatches(marker, "Tasks", 6, colA), true);
-  assert.equal(markerMatches(marker, "Tasks", 7, colA), true);
+test("buildDoneRows writes each row's own hours and empties nulls", () => {
+  const rows = buildDoneRows([["a"], ["b"]], "TS", [2, null]);
+  assert.equal(rows[0][14], 2);
+  assert.equal(rows[1][14], "");
 });
 
-test("markerMatches rejects rows outside the staged block's tolerance", () => {
-  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
-  const colA = [["a"], ["b"]];
-  assert.equal(markerMatches(marker, "Tasks", 4, colA), false);
-  assert.equal(markerMatches(marker, "Tasks", 8, colA), false);
+test("buildDoneRows keeps data wider than Column O and overwrites N/O", () => {
+  const wide = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "old-N", "old-O", "p"];
+  const rows = buildDoneRows([wide], "TS", [1]);
+  assert.equal(rows[0].length, 16);
+  assert.equal(rows[0][13], "TS");
+  assert.equal(rows[0][14], 1);
+  assert.equal(rows[0][15], "p");
 });
 
-test("markerMatches rejects another sheet or shifted rows", () => {
-  const marker = parseMoveMarker(buildMoveMarker("Tasks", 5, 2, [["a"], ["b"]]));
-  assert.equal(markerMatches(marker, "Other", 5, [["a"], ["b"]]), false);
-  assert.equal(markerMatches(marker, "Tasks", 5, [["b"], ["c"]]), false);
+test("buildDoneRows does not mutate the input rows", () => {
+  const input = [["a", "b"]];
+  buildDoneRows(input, "TS", [1]);
+  assert.deepEqual(input, [["a", "b"]]);
 });
